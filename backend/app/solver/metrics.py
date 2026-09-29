@@ -61,7 +61,9 @@ def calculate_plan_metrics(
         unassigned_orders=len(unassigned_orders),
         cancelled_orders=len(cancelled_orders),
         assignment_rate_pct=assignment_rate_pct,
-        active_engineers_count=sum(1 for r in routes if r.is_active),
+        active_engineers_count=sum(
+            1 for r in routes if any(j.status != JobStatus.CANCELLED for j in r.jobs)
+        ),
         total_engineers_count=len(engineers),
         total_distance_km=round(sum(r.total_distance_km for r in routes), 2),
         car_distance_km=round(car_km, 2),

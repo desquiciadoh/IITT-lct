@@ -5,9 +5,26 @@ import sys
 import pytest
 
 from app.domain.enums import ReasonCode, Skill, Transport
+from app.domain.models import Location, TimeWindow
 from app.solver import BaselineSolver, Solver
 from app.solver.explain import ExplanationGenerator
 from tests.helpers import REGIONS, assert_plan_valid, make_engineer, make_order
+
+
+def test_time_window_ignores_tampered_derived_minutes() -> None:
+    window = TimeWindow(start="10:00", end="12:00", start_min=-1, end_min=9999)
+    assert (window.start_min, window.end_min) == (600, 720)
+
+
+@pytest.mark.parametrize("value", ["24:00", "10:60", "-1:00", "10:000"])
+def test_time_window_rejects_invalid_time(value: str) -> None:
+    with pytest.raises(ValueError):
+        TimeWindow(start=value, end="12:00")
+
+
+def test_location_rejects_invalid_coordinates() -> None:
+    with pytest.raises(ValueError):
+        Location(lat=float("nan"), lon=37.0, address="x", district="x")
 
 
 @pytest.mark.parametrize("region", REGIONS)
