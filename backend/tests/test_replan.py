@@ -121,6 +121,13 @@ def test_cancel_done_order_is_rejected(day) -> None:
         ReplanEngine().apply_event(plan, event, orders, engineers)
 
 
+def test_cancel_unknown_order_is_rejected(day) -> None:
+    orders, engineers, plan = day
+    event = ReplanEvent(event_type=EventType.CANCEL_ORDER, event_time="13:00", order_id="missing")
+    with pytest.raises(ReplanError, match="не найдена"):
+        ReplanEngine().apply_event(plan, event, orders, engineers)
+
+
 def test_events_must_go_forward_in_time(day) -> None:
     orders, engineers, plan = day
     engine = ReplanEngine()

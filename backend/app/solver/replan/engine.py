@@ -309,6 +309,10 @@ class ReplanEngine:
                     ds.tails[eid] = [o for o in tail if o.id != oid]
                     freed_eid = eid
                     break
+            if freed_eid is None and oid not in unassigned_before:
+                raise ReplanError(
+                    f"Заявка #{oid} не находится в текущем плане и не может быть отменена"
+                )
             cancelled[oid] = f"Отменена клиентом в {when}."
 
         eng_map = {e.id: e for e in engineers}

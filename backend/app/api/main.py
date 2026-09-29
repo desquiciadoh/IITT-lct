@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,11 +30,14 @@ app = FastAPI(
     version="0.2.0",
 )
 
-# Разрешаем запросы с локального Vite dev-сервера и любых других источников
+# Состояние демо хранится в памяти одного процесса; сериализуем изменения, чтобы два
+# одновременных события не прочитали одну версию плана и не затёрли результат друг друга.
+state_lock = threading.RLock()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -239,7 +243,7 @@ def upload_dataset(request: UploadRequest) -> dict[str, Any]:
         if dup:
             raise HTTPException(status_code=400, detail=f"Повторяются ID {kind}: {', '.join(dup[:5])}")
     for o in orders:
-        if o.window.end_min < o.window.start_min or o.duration_min <= 0:
+        if o.duration_min <= 0:
             raise HTTPException(
                 status_code=400, detail=f"Заявка #{o.id}: окно или длительность заданы неверно"
             )
@@ -248,8 +252,9 @@ def upload_dataset(request: UploadRequest) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail=f"Бригада {e.name}: смена задана неверно")
     reg = f"custom-{len(CUSTOM) + 1}"
     name = request.name.strip() or "Свой набор"
-    CUSTOM[reg] = CustomDataset(name=name, orders=list(orders), engineers=list(engineers))
-    STATE.pop(reg, None)
+    with state_lock:
+        CUSTOM[reg] = CustomDataset(name=name, orders=list(orders), engineers=list(engineers))
+        STATE.pop(reg, None)
     return {
         "id": reg,
         "name": name,
@@ -276,68 +281,72 @@ def get_dataset(region: str) -> DatasetResponse:
 @app.post("/api/plan/solve", response_model=SolveResponse)
 def solve_plan(request: SolveRequest) -> SolveResponse:
     """Строит утренний план региона и базовый вариант FIFO; сбрасывает события дня."""
-    reg = _region_key(request.region)
-    orders, engineers = _load(reg)
-    solver = Solver(replan_engine.matrix, use_local_search=request.use_local_search)
-    plan = solver.solve(orders, engineers)
-    baseline = BaselineSolver(replan_engine.matrix).solve(orders, engineers)
-    STATE[reg] = RegionState(
-        region=reg,
-        orders=list(orders),
-        engineers=engineers,
-        original=plan,
-        baseline=baseline,
-        current=plan,
-        original_orders=list(orders),
-    )
-    return _response(STATE[reg])
+    with state_lock:
+        reg = _region_key(request.region)
+        orders, engineers = _load(reg)
+        solver = Solver(replan_engine.matrix, use_local_search=request.use_local_search)
+        plan = solver.solve(orders, engineers)
+        baseline = BaselineSolver(replan_engine.matrix).solve(orders, engineers)
+        STATE[reg] = RegionState(
+            region=reg,
+            orders=list(orders),
+            engineers=engineers,
+            original=plan,
+            baseline=baseline,
+            current=plan,
+            original_orders=list(orders),
+        )
+        return _response(STATE[reg])
 
 
 @app.get("/api/plan/{region}", response_model=SolveResponse)
 def get_plan(region: str) -> SolveResponse:
     """Текущая версия плана региона (с учётом применённых событий)."""
-    return _response(_state(region))
+    with state_lock:
+        return _response(_state(region))
 
 
 @app.post("/api/plan/event")
 def apply_replan_event(request: ReplanEventRequest) -> dict[str, Any]:
     """Применяет событие дня (новая заявка, авария, отмена, сход бригады) к текущему плану."""
-    st = _state(request.region)
-    try:
-        new_plan, plan_diff, orders = replan_engine.apply_event(
-            st.current, request.event, st.orders, st.engineers
-        )
-    except ReplanError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    st.current = new_plan
-    st.orders = orders
-    st.events.append(plan_diff)
-    resp = _response(st)
-    return {
-        "region": st.region,
-        "optimized": resp.optimized,
-        "morning": resp.morning,
-        "diff": resp.diff,
-        "plan_diff": plan_diff,
-        "orders": resp.orders,
-        "engineers": resp.engineers,
-        "explanations": resp.explanations,
-        "route_explanations": resp.route_explanations,
-        "events": resp.events,
-    }
+    with state_lock:
+        st = _state(request.region)
+        try:
+            new_plan, plan_diff, orders = replan_engine.apply_event(
+                st.current, request.event, st.orders, st.engineers
+            )
+        except ReplanError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        st.current = new_plan
+        st.orders = orders
+        st.events.append(plan_diff)
+        resp = _response(st)
+        return {
+            "region": st.region,
+            "optimized": resp.optimized,
+            "morning": resp.morning,
+            "diff": resp.diff,
+            "plan_diff": plan_diff,
+            "orders": resp.orders,
+            "engineers": resp.engineers,
+            "explanations": resp.explanations,
+            "route_explanations": resp.route_explanations,
+            "events": resp.events,
+        }
 
 
 @app.post("/api/plan/reset/{region}", response_model=SolveResponse)
 def reset_plan(region: str) -> SolveResponse:
     """Возвращает утренний план: отменяет все события дня."""
-    reg = _region_key(region)
-    if reg not in STATE:
-        return solve_plan(SolveRequest(region=reg))
-    st = STATE[reg]
-    st.current = st.original
-    st.orders = list(st.original_orders)
-    st.events = []
-    return _response(st)
+    with state_lock:
+        reg = _region_key(region)
+        if reg not in STATE:
+            return solve_plan(SolveRequest(region=reg))
+        st = STATE[reg]
+        st.current = st.original
+        st.orders = list(st.original_orders)
+        st.events = []
+        return _response(st)
 
 
 def _next_slot(t: int) -> int:

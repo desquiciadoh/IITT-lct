@@ -1,3 +1,5 @@
+import math
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, model_validator
@@ -15,10 +17,12 @@ from app.domain.enums import (
 
 def time_to_minutes(t_str: str) -> int:
     """Конвертация времени HH:MM в минуты от начала суток."""
-    parts = t_str.strip().split(":")
-    if len(parts) != 2:
+    value = t_str.strip()
+    if re.fullmatch(r"\d{1,2}:\d{2}", value) is None:
         raise ValueError(f"Invalid time format: {t_str}, expected HH:MM")
-    hours, minutes = int(parts[0]), int(parts[1])
+    hours, minutes = (int(part) for part in value.split(":"))
+    if hours > 23 or minutes > 59:
+        raise ValueError(f"Invalid time value: {t_str}, expected HH:MM within one day")
     return hours * 60 + minutes
 
 
@@ -41,13 +45,20 @@ class TimeWindow(BaseModel):
     @classmethod
     def calculate_minutes(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            data = dict(data)
             s = data.get("start")
             e = data.get("end")
-            if s and "start_min" not in data:
+            if s:
                 data["start_min"] = time_to_minutes(s)
-            if e and "end_min" not in data:
+            if e:
                 data["end_min"] = time_to_minutes(e)
         return data
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "TimeWindow":
+        if self.end_min < self.start_min:
+            raise ValueError("Time window end must not be earlier than start")
+        return self
 
     def contains(self, minute: int) -> bool:
         """Попадает ли минута внутрь окна [start, end]."""
@@ -66,6 +77,14 @@ class Location(BaseModel):
     address: str
     district: str
 
+    @model_validator(mode="after")
+    def validate_coordinates(self) -> "Location":
+        if not math.isfinite(self.lat) or not -90 <= self.lat <= 90:
+            raise ValueError("Latitude must be finite and between -90 and 90")
+        if not math.isfinite(self.lon) or not -180 <= self.lon <= 180:
+            raise ValueError("Longitude must be finite and between -180 and 180")
+        return self
+
 
 class TechInfo(BaseModel):
     """Технические параметры подключения (доп. усложнение)."""
@@ -77,7 +96,7 @@ class TechInfo(BaseModel):
 class Order(BaseModel):
     """Заявка на проведение работ."""
 
-    id: str
+    id: str = Field(..., min_length=1)
     skills: list[Skill]
     priority: Priority = Priority.NORMAL
     work_type: WorkType | None = Field(
@@ -135,7 +154,7 @@ class Order(BaseModel):
 class Engineer(BaseModel):
     """Инженер / выездная бригада."""
 
-    id: str
+    id: str = Field(..., min_length=1)
     name: str
     skills: list[Skill] = Field(..., min_length=1, max_length=3)
     transport: Transport
