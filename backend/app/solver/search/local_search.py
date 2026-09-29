@@ -244,6 +244,55 @@ def _two_opt_pass(fleet: Fleet) -> int:
     return moves
 
 
+def _two_opt_star_pass(fleet: Fleet) -> int:
+    """Обмен хвостами двух маршрутов после выбранных позиций.
+
+    В отличие от обычного 2-opt, маршруты не разворачиваются: хвосты просто меняются
+    местами. Это позволяет убрать дорогой стык между двумя бригадами и одновременно
+    учитывает навыки, транспорт, окна и смены через единый оценщик.
+    """
+    ev = fleet.evaluator
+    moves = 0
+    eids = [
+        e.id
+        for e in fleet.engineers
+        if fleet.is_active(e.id) and fleet.available.get(e.id, True)
+    ]
+    for a_idx, a in enumerate(eids):
+        for b in eids[a_idx + 1 :]:
+            improved = True
+            while improved:
+                improved = False
+                sa, sb = fleet.states[a], fleet.states[b]
+                for i in range(1, len(sa)):
+                    for j in range(1, len(sb)):
+                        orders_a = sa.orders[:i] + sb.orders[j:]
+                        orders_b = sb.orders[:j] + sa.orders[i:]
+                        if not all(ev.pair_reason(sa.engineer, o) is None for o in orders_a):
+                            continue
+                        if not all(ev.pair_reason(sb.engineer, o) is None for o in orders_b):
+                            continue
+                        new_a = ev.with_orders(sa, orders_a)
+                        if new_a is None:
+                            continue
+                        new_b = ev.with_orders(sb, orders_b)
+                        if new_b is None:
+                            continue
+                        delta = (
+                            new_a.breaches + new_b.breaches - sa.breaches - sb.breaches,
+                            0,
+                            new_a.cost + new_b.cost - sa.cost - sb.cost,
+                        )
+                        if _improves(delta):
+                            fleet.states[a], fleet.states[b] = new_a, new_b
+                            moves += 1
+                            improved = True
+                            break
+                    if improved:
+                        break
+    return moves
+
+
 def improve(fleet: Fleet, *, max_rounds: int = 60) -> int:
     """Применяет ходы, пока они улучшают план. Возвращает число принятых ходов."""
     total = 0
@@ -251,6 +300,7 @@ def improve(fleet: Fleet, *, max_rounds: int = 60) -> int:
         moves = _relocate_pass(fleet)
         moves += _swap_pass(fleet)
         moves += _or_opt_pass(fleet)
+        moves += _two_opt_star_pass(fleet)
         moves += _two_opt_pass(fleet)
         total += moves
         if moves == 0:
